@@ -10,17 +10,17 @@ import edge_tts
 from google import genai
 
 # ============ SETTINGS (easy things to tweak) ============
-GEMINI_MODEL = "gemini-3.8-flash"         # main model, change if Gemini says model not found
+GEMINI_MODEL = "gemini-3.8-flash"         # main model
 FALLBACK_MODEL = "gemini-2.5-flash-lite"  # used if the main model keeps failing
-VOICE = "en-US-AndrewNeural"           # try en-US-AriaNeural, en-GB-RyanNeural
-FONT_SIZE = 84                         # make bigger if text looks small
-TEXT_COLOR = (255, 255, 255)
-BG_TOP = (20, 30, 80)                  # background gradient colours
-BG_BOTTOM = (90, 40, 140)
+VOICE = "en-US-AndrewNeural"              # try en-US-AriaNeural, en-US-GuyNeural, en-GB-RyanNeural
+VOICE_RATE = "+15%"                       # faster = bigger number, e.g. +25%
+CAPTION_FONT_SIZE = 110                   # bigger number = bigger captions
+WORDS_PER_CAPTION = 3                     # how many words show at once
+HIGHLIGHT_COLOR = (255, 214, 0)           # yellow key word
 BRAND_TEXT = "BizEaseAI"
-MUSIC_FILE = "music.mp3"               # optional, used only if this file exists
-MUSIC_VOLUME = 0.08                    # lower = quieter (0.05 to 0.2)
-PAUSE_AFTER_LINE = 0.4                 # seconds of pause after each line
+MUSIC_FILE = "music.mp3"                  # must be in the repo's main folder
+MUSIC_VOLUME = 0.12                       # lower = quieter (0.05 to 0.25)
+PAD_AFTER_LINE = 0.15                     # tiny pause after each line (seconds)
 # =========================================================
 
 W, H = 1080, 1920
@@ -45,7 +45,7 @@ TOPICS = [
 def get_script():
     topic = random.choice(TOPICS)
     prompt = f"""
-You write short Instagram Reel scripts for a brand called {BRAND_TEXT}, which helps
+You write viral Instagram Reel scripts for a brand called {BRAND_TEXT}, which helps
 small business owners save time with simple AI tools.
 
 Topic: {topic}
@@ -53,16 +53,23 @@ Topic: {topic}
 Return ONLY JSON in exactly this shape:
 {{
   "title": "short title",
-  "scenes": [{{"text": "line 1"}}, {{"text": "line 2"}}],
+  "scenes": [
+    {{"text": "spoken line", "search": "two word stock video search"}}
+  ],
   "caption": "Instagram caption, 2-3 sentences, friendly, ends with a question",
   "hashtags": "#smallbusiness #ai #productivity"
 }}
 
 Rules:
-- 6 scenes total.
-- Scene 1 is a strong hook that makes people keep watching.
-- Last scene is a call to action (follow for more).
-- Each scene is under 14 words, plain English, no jargon, no emojis.
+- 7 scenes total.
+- Scene 1 is a scroll-stopping hook: a bold claim, a shocking number or a direct
+  question. Example style: "You're wasting 10 hours a week on this." Under 9 words.
+- Scenes 2 to 6 give one clear, practical tip each, in a punchy, energetic tone.
+- Scene 7 is a call to action: follow for more.
+- Each line is under 12 words, plain English, no jargon, no emojis.
+- "search" is 1 to 3 simple words describing a visual that matches the line, using
+  common stock footage subjects, such as "business owner", "laptop typing",
+  "phone messages", "coffee shop", "office team", "typing keyboard", "happy customer".
 """
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     last_error = None
@@ -82,69 +89,162 @@ Rules:
     raise last_error
 
 
-def wrap_text(draw, text, font, max_width):
-    words = text.split()
-    lines, current = [], ""
-    for word in words:
-        test = (current + " " + word).strip()
-        if draw.textlength(test, font=font) <= max_width:
-            current = test
-        else:
+def pixabay_search(query):
+    key = os.environ["PIXABAY_API_KEY"]
+    r = requests.get(
+        "https://pixabay.com/api/videos/",
+        params={"key": key, "q": query[:90], "per_page": 20, "safesearch": "true"},
+        timeout=30,
+    )
+    if not r.ok:
+        print("Pixabay error:", r.status_code, r.text[:200])
+        return []
+    return r.json().get("hits", [])
+
+
+def download_clip(query, path):
+    for q in [query, "business", "office work", "laptop"]:
+        hits = pixabay_search(q)
+        random.shuffle(hits)
+        for hit in hits:
+            sizes = hit.get("videos", {})
+            for size in ["medium", "large", "small", "tiny"]:
+                url = sizes.get(size, {}).get("url")
+                if url:
+                    try:
+                        r = requests.get(url, timeout=60)
+                        r.raise_for_status()
+                        with open(path, "wb") as f:
+                            f.write(r.content)
+                        return True
+                    except Exception as e:
+                        print("Clip download failed:", e)
+                        break
+    return False
+
+
+def audio_duration(path):
+    out = subprocess.check_output([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=nw=1:nk=1", path,
+    ])
+    return float(out.decode().strip())
+
+
+def make_caption_png(words, path):
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype(FONT_BOLD, CAPTION_FONT_SIZE)
+    brand_font = ImageFont.truetype(FONT_BOLD, 52)
+
+    words = [w.upper() for w in words]
+    key_word = max(words, key=len)
+    space = draw.textlength(" ", font=font)
+    max_w = W - 140
+
+    lines, current, current_w = [], [], 0
+    for w in words:
+        ww = draw.textlength(w, font=font)
+        add = ww if not current else space + ww
+        if current and current_w + add > max_w:
             lines.append(current)
-            current = word
+            current, current_w = [w], ww
+        else:
+            current.append(w)
+            current_w += add
     if current:
         lines.append(current)
-    return lines
 
-
-def make_slide(text, path):
-    img = Image.new("RGB", (W, H))
-    draw = ImageDraw.Draw(img)
-    # gradient background
-    for y in range(H):
-        t = y / H
-        colour = tuple(int(BG_TOP[i] * (1 - t) + BG_BOTTOM[i] * t) for i in range(3))
-        draw.line([(0, y), (W, y)], fill=colour)
-
-    font = ImageFont.truetype(FONT_BOLD, FONT_SIZE)
-    lines = wrap_text(draw, text, font, W - 160)
-    line_h = FONT_SIZE + 24
-    y = (H - line_h * len(lines)) // 2 - 100
+    line_h = CAPTION_FONT_SIZE + 30
+    y = 1150 - (line_h * len(lines)) // 2
     for line in lines:
-        w = draw.textlength(line, font=font)
-        draw.text(((W - w) / 2, y), line, font=font, fill=TEXT_COLOR)
+        total = sum(draw.textlength(w, font=font) for w in line) + space * (len(line) - 1)
+        x = (W - total) / 2
+        for w in line:
+            colour = HIGHLIGHT_COLOR if w == key_word else (255, 255, 255)
+            draw.text((x, y), w, font=font, fill=colour, stroke_width=9, stroke_fill=(0, 0, 0))
+            x += draw.textlength(w, font=font) + space
         y += line_h
 
-    small = ImageFont.truetype(FONT_BOLD, 48)
-    bw = draw.textlength(BRAND_TEXT, font=small)
-    draw.text(((W - bw) / 2, 330), BRAND_TEXT, font=small, fill=(255, 200, 80))
+    bw = draw.textlength(BRAND_TEXT, font=brand_font)
+    draw.text(((W - bw) / 2, 150), BRAND_TEXT, font=brand_font,
+              fill=(255, 255, 255), stroke_width=5, stroke_fill=(0, 0, 0))
     img.save(path)
 
 
+def caption_timings(text, duration):
+    words = text.split()
+    chunks = [words[i:i + WORDS_PER_CAPTION] for i in range(0, len(words), WORDS_PER_CAPTION)]
+    weights = [max(1, sum(len(w) for w in c)) for c in chunks]
+    total = sum(weights)
+    timings, t = [], 0.0
+    for chunk, wt in zip(chunks, weights):
+        length = duration * wt / total
+        timings.append((chunk, t, t + length))
+        t += length
+    return timings
+
+
 async def make_voice(text, path):
-    await edge_tts.Communicate(text, VOICE).save(path)
+    await edge_tts.Communicate(text, VOICE, rate=VOICE_RATE).save(path)
 
 
 def run(cmd):
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        print("FFMPEG ERROR:", e.stderr.decode(errors="ignore")[-1500:])
+        raise
+
+
+def build_scene(i, scene):
+    text = scene["text"].strip()
+    clip = f"{OUT}/clip{i}.mp4"
+    mp3 = f"{OUT}/voice{i}.mp3"
+    seg = f"{OUT}/seg{i}.mp4"
+
+    if not download_clip(scene.get("search", "business"), clip):
+        raise RuntimeError(f"Could not find a stock video for scene {i + 1}")
+
+    asyncio.run(make_voice(text, mp3))
+    dur = audio_duration(mp3) + PAD_AFTER_LINE
+
+    timings = caption_timings(text, dur)
+    pngs = []
+    for k, (chunk, start, end) in enumerate(timings):
+        p = f"{OUT}/cap{i}_{k}.png"
+        make_caption_png(chunk, p)
+        pngs.append((p, start, end))
+
+    filters = [
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+        "setsar=1,fps=30,eq=brightness=-0.10:saturation=1.1[v0]"
+    ]
+    for k, (_, start, end) in enumerate(pngs):
+        filters.append(
+            f"[v{k}][{k + 2}:v]overlay=0:0:enable='between(t,{start:.2f},{end:.2f})'[v{k + 1}]"
+        )
+    last = f"[v{len(pngs)}]"
+
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", clip, "-i", mp3]
+    for p, _, _ in pngs:
+        cmd += ["-i", p]
+    cmd += [
+        "-filter_complex", ";".join(filters),
+        "-map", last, "-map", "1:a",
+        "-af", "apad",
+        "-t", f"{dur:.2f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-r", "30",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+        seg,
+    ]
+    run(cmd)
+    return os.path.abspath(seg)
 
 
 def build_video(scenes):
-    segments = []
-    for i, scene in enumerate(scenes):
-        text = scene["text"].strip()
-        png = f"{OUT}/slide{i}.png"
-        mp3 = f"{OUT}/voice{i}.mp3"
-        seg = f"{OUT}/seg{i}.mp4"
-        make_slide(text, png)
-        asyncio.run(make_voice(text, mp3))
-        run([
-            "ffmpeg", "-y", "-loop", "1", "-framerate", "30", "-i", png, "-i", mp3,
-            "-af", f"apad=pad_dur={PAUSE_AFTER_LINE}",
-            "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "30",
-            "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", seg,
-        ])
-        segments.append(os.path.abspath(seg))
+    segments = [build_scene(i, s) for i, s in enumerate(scenes)]
 
     list_file = f"{OUT}/list.txt"
     with open(list_file, "w") as f:
@@ -159,10 +259,12 @@ def build_video(scenes):
         run([
             "ffmpeg", "-y", "-i", joined, "-stream_loop", "-1", "-i", MUSIC_FILE,
             "-filter_complex",
-            f"[1:a]volume={MUSIC_VOLUME}[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[a]",
+            f"[1:a]volume={MUSIC_VOLUME}[m];"
+            f"[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
             "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-shortest", final,
         ])
     else:
+        print("No music.mp3 found, making the reel without music.")
         os.replace(joined, final)
     return final
 
@@ -176,7 +278,7 @@ def send_to_telegram(video_path, caption):
             url,
             data={"chat_id": chat_id, "caption": caption[:1000], "supports_streaming": True},
             files={"video": f},
-            timeout=120,
+            timeout=180,
         )
     if not r.ok:
         raise RuntimeError(f"Telegram error: {r.status_code} {r.text}")
