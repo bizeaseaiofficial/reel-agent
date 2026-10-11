@@ -9,7 +9,7 @@ import edge_tts
 from google import genai
 
 # ============ SETTINGS (easy things to tweak) ============
-GEMINI_MODEL = "gemini-2.5-flash"      # change if Gemini says model not found
+GEMINI_MODEL = "gemini-3.8-flash"      # change if Gemini says model not found
 VOICE = "en-US-AndrewNeural"           # try en-US-AriaNeural, en-GB-RyanNeural
 FONT_SIZE = 84                         # make bigger if text looks small
 TEXT_COLOR = (255, 255, 255)
