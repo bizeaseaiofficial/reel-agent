@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import random
 import asyncio
@@ -9,7 +10,8 @@ import edge_tts
 from google import genai
 
 # ============ SETTINGS (easy things to tweak) ============
-GEMINI_MODEL = "gemini-3.8-flash"      # change if Gemini says model not found
+GEMINI_MODEL = "gemini-3.8-flash"         # main model, change if Gemini says model not found
+FALLBACK_MODEL = "gemini-2.5-flash-lite"  # used if the main model keeps failing
 VOICE = "en-US-AndrewNeural"           # try en-US-AriaNeural, en-GB-RyanNeural
 FONT_SIZE = 84                         # make bigger if text looks small
 TEXT_COLOR = (255, 255, 255)
@@ -63,12 +65,21 @@ Rules:
 - Each scene is under 14 words, plain English, no jargon, no emojis.
 """
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    resp = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config={"response_mime_type": "application/json"},
-    )
-    return json.loads(resp.text)
+    last_error = None
+    for attempt in range(6):
+        model = GEMINI_MODEL if attempt < 4 else FALLBACK_MODEL
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config={"response_mime_type": "application/json"},
+            )
+            return json.loads(resp.text)
+        except Exception as e:
+            last_error = e
+            print(f"Attempt {attempt + 1} failed ({model}): {e}")
+            time.sleep(15 * (attempt + 1))
+    raise last_error
 
 
 def wrap_text(draw, text, font, max_width):
